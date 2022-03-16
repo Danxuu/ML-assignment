@@ -1,0 +1,217 @@
+library('ggplot2')
+library('ggthemes')
+library('scales')
+library('dplyr')
+library('mice')
+library('randomForest')
+library('e1071')
+library("rpart")
+library("rpart.plot")
+# loading the training and test dataset
+train <- read.csv('train.csv', stringsAsFactors = F)
+test <- read.csv('test.csv', stringsAsFactors = F)
+# combine the training and test dataset
+full <- bind_rows(train, test)
+# fetch the passenger name of title
+full$Title <- gsub('(.*, )|(\\..*)', '', full$Name)
+table(full$Sex, full$Title)
+# less counts would be assigned to 'other' title
+other_title <- c('Dona', 'Lady', 'the Countess','Capt', 'Col', 'Don',
+'Dr', 'Major', 'Rev', 'Sir', 'Jonkheer')
+# rename the title of Mlle, Ms, Mme and Others, and display
+full$Title[full$Title == 'Mlle'] <- 'Miss'
+full$Title[full$Title == 'Ms'] <- 'Miss'
+full$Title[full$Title == 'Mme'] <- 'Mrs'
+full$Title[full$Title %in% other_title] <- 'Others'
+table(full$Sex, full$Title)
+# Fetch the surname
+full$Surname <- sapply(full$Name,
+function(x) strsplit(x, split = '[,.]')[[1]][1])
+# Create a family size variable
+full$FamilySize <- full$SibSp + full$Parch + 1
+# Create a family variable
+full$Family <- paste(full$Surname, full$FamilySize, sep='_')
+# display the relationship between family size & survival
+ggplot(full[1:891,], aes(x = FamilySize, fill = factor(Survived))) +
+geom_bar(stat='count', position='dodge', group='Survived') +
+scale_x_continuous(breaks=c(1:12)) +
+labs(x = 'Family Size') + theme_few() + scale_fill_manual(values=c("green", "red"))
+# Decrease the degree of family size
+full$FamilysizeNew[full$FamilySize == 1] <- 'Single'
+full$FamilysizeNew[full$FamilySize < 5 & full$FamilySize > 1] <- 'Small
+full$FamilysizeNew[full$FamilySize > 4] <- 'Large'
+# Display family size by survival
+mosaicplot(table(full$FamilysizeNew, full$Survived), main='Family Size & Survival',
+shade=TRUE)
+# This variable appears to have a lot of missing values
+full$Cabin[1:28]
+# The first character is the deck. For example:
+strsplit(full$Cabin[2], NULL)[[1]]
+# Create a Deck variable. Get passenger deck A - F:
+full$Deck<-factor(sapply(full$Cabin, function(x) strsplit(x, NULL)[[1]][1]))
+# Passengers 62 and 830 are missing Embarkment
+full[c(62, 830), 'Embarked']
+# Remove the missing passengerId
+embark_fare <- full %>%
+filter(PassengerId != 62 & PassengerId != 830)
+# Display embarkment, passenger class, & median fare
+ggplot(embark_fare, aes(x = Embarked, y = Fare, fill = factor(Pclass))) +
+geom_boxplot() + geom_hline(aes(yintercept=80), colour='green', lwd=1) +
+scale_y_continuous(labels=dollar_format()) + theme_few()
+# Since their fare was $80 for 1st class, they most likely embarked from 'C'
+full$Embarked[c(62, 830)] <- 'C'
+# view dare distribution
+ggplot(full[full$Pclass == '3' & full$Embarked == 'S', ], aes(x = Fare)) +
+geom_density(fill = 'blue', alpha=0.5) +
+geom_vline(aes(xintercept=median(Fare, na.rm=T)), colour='yellow', lwd=1) +
+scale_x_continuous(labels=dollar_format())
+# Replace the missing fare value with median fare
+full$Fare[1044] <- median(full[full$Pclass == '3' & full$Embarked == 'S', ]$Fare, na.rm =
+TRUE)
+# Make variables factors into factors
+factor_vars <- c('PassengerId','Pclass','Sex','Embarked',
+'Title','Surname','Family','FamilysizeNew')
+full[factor_vars] <- lapply(full[factor_vars], function(x) as.factor(x))
+# Set a random seed
+set.seed(129)
+# Perform the process of imputation
+mice_mod <- mice(full[, !names(full) %in%
+c('PassengerId','Name','Ticket','Cabin','Family','Surname','Survived')], method='rf')
+mice_output <- complete(mice_mod)
+# Plot age distributions
+par(mfrow=c(1,2))
+hist(full$Age, freq=F, main='Before Cleaning ',
+col='red', ylim=c(0,0.04))
+hist(mice_output$Age, freq=F, main='After Cleaning',
+col='blue', ylim=c(0,0.04))
+# Replace Age variable with output
+full$Age <- mice_output$Age
+# Relationship between age and survival by gender
+ggplot(full[1:891,], aes(Age, fill = factor(Survived))) + geom_histogram() +
+facet_grid(.~Sex) + scale_fill_manual(values=c("green", "red"))
+# Create child variable
+full$Child[full$Age < 18] <- 'Child'
+full$Child[full$Age >= 18] <- 'Adult'
+# Create Mother variable
+full$Mother <- 'Not Mother'
+full$Mother[full$Sex == 'female' & full$Parch > 0 & full$Age > 18 & full$Title != 'Miss'] <-
+'Mother'
+full$Child <- factor(full$Child)
+full$Mother <- factor(full$Mother)
+md.pattern(full)
+#view survival by mother and child
+ggplot(full[1:891,], aes(Mother, fill = factor(Survived))) + geom_histogram(stat="count")
+ggplot(full[1:891,], aes(Child, fill = factor(Survived))) + geom_histogram(stat="count")
+#--------------------------------------------------------------------------------------------------------------
+# Building predictive model
+# Split the dataset as train and test
+train <- full[1:891,]
+test <- full[892:1309,]
+# Decision Tree
+# Build the tree
+decisiob_tree <- rpart(Survived ~ Pclass + Sex + Age + SibSp + Parch +
+Fare + Embarked + Title + FamilysizeNew + Child + Mother,
+data = train, method = "class", control=rpart.control(cp=0.0001))
+summary(decisiob_tree)
+# view decision tree
+prp(decisiob_tree, type = 3, extra = 100)
+# prediction
+prediction <- predict(decisiob_tree, test, type = "class")
+head(prediction)
+# Create a data frame with two columns: PassengerId & Survived. Survived contains your
+predictions
+dt_result <- data.frame(PassengerId = test$PassengerId, Survived = prediction)
+head(dt_result)
+# Output results with csv file
+write.csv(dt_result, file = "dt_result.csv",row.names=FALSE)
+# decision tree
+fit_dt <- rpart(Survived ~ Pclass + Sex + Age + SibSp + Parch +
+Fare + Embarked + Title + FamilysizeNew + Child + Mother,
+data = train, method = "class", control=rpart.control(cp=0.0001))
+# predicted result of regression
+dt = predict(decisiob_tree)
+dt_res = rep(NA,891)
+for(i in 1:891){
+if(dt[i,1] >= dt[i,2] ){
+dt_res[i] = 0
+} else{
+dt_res[i] = 1
+}
+}
+# check result
+mean(dt_res == train$Survived)
+table(dt_res)
+# Decision Tree
+tp = sum(dt_res ==1 & train$Survived == 1)
+fp = sum(dt_res ==1 & train$Survived == 0)
+fn = sum(dt_res ==0 & train$Survived == 1)
+tn = sum(dt_res ==0 & train$Survived == 0)
+dt_cm = data.frame(tp,fp,fn,tn)
+show(dt_cm)
+#--------------------------------------------------------------------------------------------------------------
+#SVM
+svm_model <- svm(factor(Survived) ~ Pclass + Sex + Age + SibSp + Parch +
+Fare + Embarked + Title + FamilysizeNew + Child + Mother,
+data = train)
+show(svm_model)
+# predicted result of regression
+prediction_svm = predict(svm_model)
+svm_result <- data.frame(PassengerId = test$PassengerId, Survived = prediction)
+head(svm_result)
+write.csv(dt_result, file = "svm_result.csv",row.names=FALSE)
+res_svm = rep(NA,891)
+for(i in 1:891){
+res_svm[i] = as.integer(prediction_svm[[i]]) - 1
+}
+# check result
+mean(res_svm == train$Survived)
+table(res_svm)
+tp = sum(res_svm ==1 & train$Survived == 1)
+fp = sum(res_svm ==1 & train$Survived == 0)
+fn = sum(res_svm ==0 & train$Survived == 1)
+tn = sum(res_svm ==0 & train$Survived == 0)
+svm_cm = data.frame(tp,fp,fn,tn)
+show(svm_cm)
+#--------------------------------------------------------------------------------------------------------------
+# Random forest
+# Set a random seed
+set.seed(650)
+# Build the model
+rf_model <- randomForest(factor(Survived) ~ Pclass + Sex + Age + SibSp + Parch +
+Fare + Embarked + Title +
+FamilysizeNew + Child + Mother,
+data = train)
+show(rf_model)
+# Show model error
+plot(rf_model, ylim=c(0,0.38))
+legend('topright', colnames(rf_model$err.rate), col=1:3, fill=1:3)
+# Predict the test set
+prediction <- predict(rf_model, test)
+# Save the solution to a dataframe with two columns: PassengerId and Survived (prediction)
+rf_results <- data.frame(PassengerID = test$PassengerId, Survived = prediction)
+# Write the solution to file
+write.csv(rf_results, file = 'result_rf.csv', row.names = F)
+rf = predict(rf_model)
+res_rf = rep(NA,891)
+for(i in 1:891){
+res_rf[i] = as.integer(rf[[i]]) - 1
+}
+# check result
+mean(res_rf == train$Survived)
+table(res_rf)
+# Random Forest
+tp = sum(res_rf ==1 & train$Survived == 1)
+fp = sum(res_rf ==1 & train$Survived == 0)
+fn = sum(res_rf ==0 & train$Survived == 1)
+tn = sum(res_rf ==0 & train$Survived == 0)
+data.frame(tp,fp,fn,tn)
+#--------------------------------------------------------------------------------------------------------------
+#Evaluation
+# get importance
+importance <- importance(rf_model)
+varImportance <- data.frame(Variables = row.names(importance),
+Importance = round(importance[ ,'MeanDecreaseGini'],2))
+# view importance of variables
+ggplot(varImportance, aes(x = reorder(Variables, Importance),
+y = Importance, fill = Importance)) +
+geom_bar(stat='identity', colour='red')
